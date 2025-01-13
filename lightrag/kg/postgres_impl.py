@@ -141,16 +141,13 @@ class PostgreSQLDB:
                     await connection.execute(sql)
                 else:
                     await connection.execute(sql, *data.values())
-        except (
-            asyncpg.exceptions.UniqueViolationError,
-            asyncpg.exceptions.DuplicateTableError,
-        ) as e:
+        except asyncpg.exceptions.UniqueViolationError as e:
             if upsert:
                 print("Key value duplicate, but upsert succeeded.")
             else:
                 logger.error(f"Upsert error: {e}")
         except Exception as e:
-            logger.error(f"PostgreSQL database error: {e.__class__} - {e}")
+            logger.error(f"PostgreSQL database error: {e}")
             print(sql)
             print(data)
             raise
@@ -412,7 +409,8 @@ class PGDocStatusStorage(DocStatusStorage):
 
     async def filter_keys(self, data: list[str]) -> set[str]:
         """Return keys that don't exist in storage"""
-        sql = f"SELECT id FROM LIGHTRAG_DOC_STATUS WHERE workspace=$1 AND id IN ({",".join([f"'{_id}'" for _id in data])})"
+        id_list = ",".join([f"'{_id}'" for _id in data])
+        sql = f"SELECT id FROM LIGHTRAG_DOC_STATUS WHERE workspace=$1 AND id IN ({id_list})"
         result = await self.db.query(sql, {"workspace": self.db.workspace}, True)
         # The result is like [{'id': 'id1'}, {'id': 'id2'}, ...].
         if result is None:
@@ -888,12 +886,7 @@ class PGGraphStorage(BaseGraphStorage):
             )
 
             if source_label and target_label:
-                edges.append(
-                    (
-                        PGGraphStorage._decode_graph_label(source_label),
-                        PGGraphStorage._decode_graph_label(target_label),
-                    )
-                )
+                edges.append((source_label, target_label))
 
         return edges
 
@@ -1145,17 +1138,17 @@ SQL_TEMPLATES = {
     # SQL for VectorStorage
     "entities": """SELECT entity_name FROM
         (SELECT id, entity_name, 1 - (content_vector <=> '[{embedding_string}]'::vector) as distance
-        FROM LIGHTRAG_VDB_ENTITY where workspace=$1)
+        FROM LIGHTRAG_VDB_ENTITY where workspace=$1) AS subquery_alias
         WHERE distance>$2 ORDER BY distance DESC  LIMIT $3
        """,
     "relationships": """SELECT source_id as src_id, target_id as tgt_id FROM
         (SELECT id, source_id,target_id, 1 - (content_vector <=> '[{embedding_string}]'::vector) as distance
-        FROM LIGHTRAG_VDB_RELATION where workspace=$1)
+        FROM LIGHTRAG_VDB_RELATION where workspace=$1) AS subquery_alias
         WHERE distance>$2 ORDER BY distance DESC  LIMIT $3
        """,
     "chunks": """SELECT id FROM
         (SELECT id, 1 - (content_vector <=> '[{embedding_string}]'::vector) as distance
-        FROM LIGHTRAG_DOC_CHUNKS where workspace=$1)
+        FROM LIGHTRAG_DOC_CHUNKS where workspace=$1) AS subquery_alias
         WHERE distance>$2 ORDER BY distance DESC  LIMIT $3
        """,
 }
