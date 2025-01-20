@@ -22,3 +22,6 @@ venv/
 examples/input/
 examples/output/
 .DS_Store
+app/
+PSY/
+log_*

@@ -7,6 +7,7 @@ from lightrag.llm import lollms_model_complete, lollms_embed
 from lightrag.llm import ollama_model_complete, ollama_embed
 from lightrag.llm import openai_complete_if_cache, openai_embedding
 from lightrag.llm import azure_openai_complete_if_cache, azure_openai_embedding
+from lightrag.llm import zhipu_embedding
 
 from lightrag.utils import EmbeddingFunc
 from typing import Optional, List, Union
@@ -23,7 +24,20 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from starlette.status import HTTP_403_FORBIDDEN
 import pipmaster as pm
+import asyncio
+from fastapi.responses import StreamingResponse
 
+from dotenv import dotenv_values, load_dotenv
+
+# 指定 .env 文件的路径
+env_path = "./.env"
+# 加载指定路径的 .env 文件中的变量
+load_dotenv(env_path)  # 将变量加载到环境变量中
+env_vars = dotenv_values(env_path)  # 将变量加载到字典中
+
+# 将 .env 文件中的变量加载到全局命名空间
+for key, value in env_vars.items():
+    globals()[key] = value
 
 def get_default_host(binding_type: str) -> str:
     default_hosts = {
@@ -45,13 +59,13 @@ def parse_args():
     # Start by the bindings
     parser.add_argument(
         "--llm-binding",
-        default="ollama",
+        default=os.getenv("LLM_BINDING", "ollama"),
         help="LLM binding to be used. Supported: lollms, ollama, openai (default: ollama)",
     )
     parser.add_argument(
         "--embedding-binding",
-        default="ollama",
-        help="Embedding binding to be used. Supported: lollms, ollama, openai (default: ollama)",
+        default=os.getenv("EMBEDDING_BINDING", "ollama"),
+        help="Embedding binding to be used. Supported: lollms, ollama, openai, zhipu (default: ollama)",
     )
 
     # Parse just these arguments first
@@ -69,12 +83,12 @@ def parse_args():
     # Directory configuration
     parser.add_argument(
         "--working-dir",
-        default="./rag_storage",
+        default=os.getenv("WORKING_DIR", "./rag_storage"),
         help="Working directory for RAG storage (default: ./rag_storage)",
     )
     parser.add_argument(
         "--input-dir",
-        default="./inputs",
+        default=os.getenv("INPUT_DIR", "./inputs"),
         help="Directory containing input documents (default: ./inputs)",
     )
 
@@ -88,7 +102,7 @@ def parse_args():
 
     parser.add_argument(
         "--llm-model",
-        default="mistral-nemo:latest",
+        default=os.getenv("LLM_MODEL", "mistral-nemo:latest"),
         help="LLM model name (default: mistral-nemo:latest)",
     )
 
@@ -130,7 +144,7 @@ def parse_args():
     parser.add_argument(
         "--embedding-dim",
         type=int,
-        default=1024,
+        default=os.getenv("EMBEDDING_DIM", 1024),
         help="Embedding dimensions (default: 1024)",
     )
     parser.add_argument(
@@ -259,13 +273,81 @@ def get_api_key_dependency(api_key: Optional[str]):
 
     return api_key_auth
 
+# -------- DeepSeek 初始化 --------
+async def deepseek_complete_if_cache(
+    prompt, system_prompt=None, history_messages=[], keyword_extraction=False, **kwargs
+) -> str:
+    # 删除 kwargs 中的 host和options 参数，否则会报错
+    kwargs.pop("host", None)  
+    kwargs.pop("options", None)
+    return await openai_complete_if_cache(
+        DEEPSEEK_MODEL,
+        prompt,
+        system_prompt=system_prompt,
+        history_messages=history_messages,
+        api_key=DEEPSEEK_API_KEY,
+        base_url=DEEPSEEK_BASE_URL,
+        **kwargs,
+    )
+
+def get_llm_model_func(args):
+    """
+    根据 args.llm_binding 返回对应的 LLM 模型函数
+    """
+    if args.llm_binding == "lollms":
+        return lollms_model_complete
+    elif args.llm_binding == "ollama":
+        return ollama_model_complete
+    elif args.llm_binding == "azure_openai":
+        return azure_openai_complete_if_cache
+    elif args.llm_binding == "openai":
+        return openai_complete_if_cache
+    elif args.llm_binding == "deepseek":
+        # TODO: 
+        return deepseek_complete_if_cache
+    else:
+        raise ValueError(f"Unsupported LLM binding: {args.llm_binding}")
+
+def get_embedding_func(args):
+    """
+    根据 args.embedding_binding 返回对应的 embedding 函数
+    """
+    print("args.embedding_binding= "+args.embedding_binding)
+    if args.embedding_binding == "lollms":
+        return lambda texts: lollms_embed(
+            texts,
+            embed_model=args.embedding_model,
+            host=args.embedding_binding_host,
+        )
+    elif args.embedding_binding == "ollama":
+        return lambda texts: ollama_embed(
+            texts,
+            embed_model=args.embedding_model,
+            host=args.embedding_binding_host,
+        )
+    elif args.embedding_binding == "azure_openai":
+        return lambda texts: azure_openai_embedding(
+            texts,
+            model=args.embedding_model,  # no host is used for openai
+        )
+    elif args.embedding_binding == "openai":
+        return lambda texts: openai_embedding(
+            texts,
+            model=args.embedding_model,  # no host is used for openai
+        )
+    elif args.embedding_binding == "zhipu":
+        return lambda texts: (
+            zhipu_embedding(texts)
+        )
+    else:
+        raise ValueError(f"Unsupported embedding binding: {args.embedding_binding}")
 
 def create_app(args):
     # Verify that bindings arer correctly setup
-    if args.llm_binding not in ["lollms", "ollama", "openai"]:
+    if args.llm_binding not in ["lollms", "ollama", "openai", "deepseek"]:
         raise Exception("llm binding not supported")
 
-    if args.embedding_binding not in ["lollms", "ollama", "openai"]:
+    if args.embedding_binding not in ["lollms", "ollama", "openai", "zhipu"]:
         raise Exception("embedding binding not supported")
 
     # Add SSL validation
@@ -319,13 +401,7 @@ def create_app(args):
     # Initialize RAG
     rag = LightRAG(
         working_dir=args.working_dir,
-        llm_model_func=lollms_model_complete
-        if args.llm_binding == "lollms"
-        else ollama_model_complete
-        if args.llm_binding == "ollama"
-        else azure_openai_complete_if_cache
-        if args.llm_binding == "azure_openai"
-        else openai_complete_if_cache,
+        llm_model_func=get_llm_model_func(args),  # 调用提取的函数
         llm_model_name=args.llm_model,
         llm_model_max_async=args.max_async,
         llm_model_max_token_size=args.max_tokens,
@@ -337,28 +413,13 @@ def create_app(args):
         embedding_func=EmbeddingFunc(
             embedding_dim=args.embedding_dim,
             max_token_size=args.max_embed_tokens,
-            func=lambda texts: lollms_embed(
-                texts,
-                embed_model=args.embedding_model,
-                host=args.embedding_binding_host,
-            )
-            if args.llm_binding == "lollms"
-            else ollama_embed(
-                texts,
-                embed_model=args.embedding_model,
-                host=args.embedding_binding_host,
-            )
-            if args.llm_binding == "ollama"
-            else azure_openai_embedding(
-                texts,
-                model=args.embedding_model,  # no host is used for openai
-            )
-            if args.llm_binding == "azure_openai"
-            else openai_embedding(
-                texts,
-                model=args.embedding_model,  # no host is used for openai
-            ),
+            func=get_embedding_func(args),
         ),
+        # 接通数据库
+        doc_status_storage="MongoKVStorage",
+        kv_storage="MongoKVStorage",
+        graph_storage="Neo4JStorage",
+        vector_storage="MilvusVectorDBStorge",
     )
 
     async def index_file(file_path: Union[str, Path]) -> None:
@@ -526,7 +587,7 @@ def create_app(args):
     @app.post("/query/stream", dependencies=[Depends(optional_api_key)])
     async def query_text_stream(request: QueryRequest):
         try:
-            response = rag.query(
+            response = await rag.aquery(
                 request.query,
                 param=QueryParam(
                     mode=request.mode,
@@ -534,12 +595,7 @@ def create_app(args):
                     only_need_context=request.only_need_context,
                 ),
             )
-
-            async def stream_generator():
-                async for chunk in response:
-                    yield chunk
-
-            return stream_generator()
+            return StreamingResponse(response, media_type="text/plain")
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
