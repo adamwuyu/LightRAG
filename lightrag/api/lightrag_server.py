@@ -11,6 +11,7 @@ from lightrag.llm import lollms_model_complete, lollms_embed
 from lightrag.llm import ollama_model_complete, ollama_embed
 from lightrag.llm import openai_complete_if_cache, openai_embedding
 from lightrag.llm import azure_openai_complete_if_cache, azure_openai_embedding
+from lightrag.llm import zhipu_embedding
 from lightrag.api import __api_version__
 
 from lightrag.utils import EmbeddingFunc
@@ -552,7 +553,7 @@ def create_app(args):
     if args.llm_binding not in ["lollms", "ollama", "openai"]:
         raise Exception("llm binding not supported")
 
-    if args.embedding_binding not in ["lollms", "ollama", "openai"]:
+    if args.embedding_binding not in ["lollms", "ollama", "openai", "zhipu"]:
         raise Exception("embedding binding not supported")
 
     # Add SSL validation
@@ -661,6 +662,12 @@ def create_app(args):
             api_key=args.embedding_binding_api_key,
         )
         if args.embedding_binding == "azure_openai"
+        else zhipu_embedding(
+            texts,
+            # no host is used for zhipu, api key is ZHIPUAI_API_KEY in .env
+            model=args.embedding_model,  
+        )
+        if args.embedding_binding == "zhipu"
         else openai_embedding(
             texts,
             model=args.embedding_model,  # no host is used for openai,
